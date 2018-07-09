@@ -1,0 +1,15 @@
+/data/
+
+/saves/
+
+/.idea/
+
+/.vscode/
+
+/results/
+/model/backup/
+*sh
+
+*.pyc
+
+example.py
