@@ -272,7 +272,7 @@ class CRF(nn.Module):
             # for the last timestep
             seq_end = sequence_lengths[idx]-1
             _, best_last_tag = (viterbi_score[seq_end][idx] + self.end_transitions.data).max(0)
-            best_tags = [best_last_tag[0]] #[best_last_tag[0]] #[best_last_tag.item()]
+            best_tags = [best_last_tag.item()] #[best_last_tag[0]] #[best_last_tag.item()]
 
             # We trace back where the best last tag comes from, append that to our best tag
             # sequence, and trace it back again, and so on

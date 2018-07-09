@@ -1,4 +1,5 @@
 from fastai.text import *
+from allennlp.modules.elmo import Elmo, batch_to_ids
 from .data_utils import pad_sequences, minibatches, get_chunks
 from .crf import CRF
 from .general_utils import Progbar
@@ -102,8 +103,10 @@ class NERLearner(object):
                         nlevels=2)
 
                     else:
-                        char_ids, word_ids = zip(*words)
-                        word_ids, sequence_lengths = pad_sequences(word_ids, 0)
+                        word_ids, sequence_lengths = pad_sequences(words, 0)
+
+                    if self.config.use_elmo:
+                        word_ids = words
 
                     if labels:
                         labels, _ = pad_sequences(labels, 0)
@@ -152,17 +155,141 @@ class NERLearner(object):
 
         scheduler = StepLR(self.optimizer, step_size=1, gamma=self.config.lr_decay)
 
+        if self.config.use_elmo:
+            options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+            weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+            self.elmo = Elmo(options_file, weight_file, 2, dropout=0).cuda()
+            print("Moved elmo to cuda")
         if not fine_tune: self.logger.info("Training Model")
+
         for epoch in range(epochs):
             scheduler.step()
-            self.train(epoch, nbatches_train, train_generator, fine_tune=fine_tune)
-            self.test(nbatches_dev, dev_generator, fine_tune=fine_tune)
+            if self.config.use_elmo:
+                self.train_elmo(epoch, nbatches_train, train_generator, fine_tune=fine_tune)
+                self.test_elmo(nbatches_dev, dev_generator, fine_tune=fine_tune)
+            else:
+                self.train(epoch, nbatches_train, train_generator, fine_tune=fine_tune)
+                self.test(nbatches_dev, dev_generator, fine_tune=fine_tune)
 
         if fine_tune:
             self.save(self.config.ner_ft_path)
         else :
             self.save(self.config.ner_model_path)
 
+
+    def train_elmo(self, epoch, nbatches_train, train_generator, fine_tune=False):
+        self.logger.info('\nEpoch: %d' % epoch)
+        self.model.train()
+        if not self.config.use_elmo:
+            self.model.emb.weight.requires_grad = False
+
+        train_loss = 0
+        correct = 0
+        total = 0
+
+        prog = Progbar(target=nbatches_train)
+
+        for batch_idx, (inputs, targets, sequence_lengths) in enumerate(train_generator):
+
+            if batch_idx == nbatches_train: break
+            if inputs['word_ids'].shape[0] == 1:
+                self.logger.info('Skipping batch of size=1')
+                continue
+
+            sentences = inputs['word_ids']
+            character_ids = batch_to_ids(sentences)
+            embeddings = self.elmo(character_ids.cuda())
+
+            word_input = embeddings['elmo_representations'][0]
+            targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
+            self.optimizer.zero_grad()
+
+            word_input, targets = Variable(word_input, requires_grad=False), \
+                                  Variable(targets)
+
+            inputs = (word_input)
+            outputs = self.model(inputs)
+
+            # Create mask
+            mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+            # Get CRF Loss
+            loss = -1*self.criterion(outputs, targets, mask=mask)
+            loss.backward()
+            self.optimizer.step()
+
+            # Callbacks
+            train_loss += loss.item()
+            predictions = self.criterion.decode(outputs, mask=mask)
+            masked_targets = mask_targets(targets, sequence_lengths)
+
+            t_ = mask.type(torch.LongTensor).sum().item()
+
+            total += t_
+            c_ = sum([1 if p[i] == mt[i] else 0 for p, mt in zip(predictions, masked_targets) for i in range(len(p))])
+            correct += c_
+            prog.update(batch_idx + 1, values=[("train loss", loss.item())], exact=[("Accuracy", 100*c_/t_)])
+
+        self.logger.info("Train Accuracy: %.3f%% (%d/%d)" %(100.*correct/total, correct, total) )
+
+    def test_elmo(self, nbatches_val, val_generator, fine_tune=False):
+        self.model.eval()
+        accs = []
+        test_loss = 0
+        correct_preds = 0
+        total_correct = 0
+        total_preds = 0
+        total_step = None
+
+        for batch_idx, (inputs, targets, sequence_lengths) in enumerate(val_generator):
+            if batch_idx == nbatches_val: break
+            if inputs['word_ids'].shape[0] == 1:
+                self.logger.info('Skipping batch of size=1')
+                continue
+
+            total_step = batch_idx
+
+            sentences = inputs['word_ids']
+            character_ids = batch_to_ids(sentences)
+            embeddings = self.elmo(character_ids.cuda())
+
+            word_input = embeddings['elmo_representations'][1]
+            targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
+
+            word_input, targets = Variable(word_input, requires_grad=False), \
+                                  Variable(targets)
+
+            inputs = (word_input)
+            outputs = self.model(inputs)
+
+            # Create mask
+            mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+
+            # Get CRF Loss
+            loss = -1*self.criterion(outputs, targets, mask=mask)
+
+            # Callbacks
+            test_loss += loss.item()
+            predictions = self.criterion.decode(outputs, mask=mask)
+            masked_targets = mask_targets(targets, sequence_lengths)
+
+            for lab, lab_pred in zip(masked_targets, predictions):
+
+                accs    += [1 if a==b else 0 for (a, b) in zip(lab, lab_pred)]
+
+                lab_chunks      = set(get_chunks(lab, self.config.vocab_tags))
+                lab_pred_chunks = set(get_chunks(lab_pred,
+                                                 self.config.vocab_tags))
+
+                correct_preds += len(lab_chunks & lab_pred_chunks)
+                total_preds   += len(lab_pred_chunks)
+                total_correct += len(lab_chunks)
+
+        p   = correct_preds / total_preds if correct_preds > 0 else 0
+        r   = correct_preds / total_correct if correct_preds > 0 else 0
+        f1  = 2 * p * r / (p + r) if correct_preds > 0 else 0
+        acc = np.mean(accs)
+
+        self.logger.info("Val Loss : %.3f, Val Accuracy: %.3f%%, Val F1: %.3f%%" %(test_loss/(total_step+1), 100*acc, 100*f1))
 
     def train(self, epoch, nbatches_train, train_generator, fine_tune=False):
         self.logger.info('\nEpoch: %d' % epoch)
@@ -202,13 +329,13 @@ class NERLearner(object):
             self.optimizer.step()
 
             # Callbacks
-            train_loss += loss.data[0] #loss.item()
+            train_loss += loss.item()
             predictions = self.criterion.decode(outputs, mask=mask)
             masked_targets = mask_targets(targets, sequence_lengths)
 
-            t_ = mask.type(torch.LongTensor).sum().data[0]
+            t_ = mask.type(torch.LongTensor).sum().item()
             total += t_
-            c_ = sum([p[i] == mt[i] for p, mt in zip(predictions, masked_targets) for i in range(len(p))])
+            c_ = sum([1 if p[i] == mt[i] else 0 for p, mt in zip(predictions, masked_targets) for i in range(len(p))])
             correct += c_
 
             prog.update(batch_idx + 1, values=[("train loss", loss.data[0])], exact=[("Accuracy", 100*c_/t_)])
@@ -251,13 +378,13 @@ class NERLearner(object):
             loss *= -1
 
             # Callbacks
-            test_loss += loss.data[0] #loss.item()
+            test_loss += loss.item()
             predictions = self.criterion.decode(outputs, mask=mask)
             masked_targets = mask_targets(targets, sequence_lengths)
 
             for lab, lab_pred in zip(masked_targets, predictions):
 
-                accs    += [a==b for (a, b) in zip(lab, lab_pred)]
+                accs    += [1 if a==b else 0 for (a, b) in zip(lab, lab_pred)]
 
                 lab_chunks      = set(get_chunks(lab, self.config.vocab_tags))
                 lab_pred_chunks = set(get_chunks(lab_pred,

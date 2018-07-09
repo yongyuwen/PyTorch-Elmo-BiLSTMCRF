@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 import os
 
 
@@ -374,7 +375,9 @@ def get_chunk_type(tok, idx_to_tag):
         tuple: "B", "PER"
 
     """
+    if isinstance(tok, torch.Tensor): tok = tok.item()
     tag_name = idx_to_tag[tok]
+
     tag_class = tag_name.split('-')[0]
     tag_type = tag_name.split('-')[-1]
     return tag_class, tag_type
