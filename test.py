@@ -19,7 +19,7 @@ def main():
 
     learn = NERLearner(config, model)
     learn.load()
-    #learn.evaluate(test)
+    learn.evaluate(test)
 
     pred = learn.predict(["Peter", "Johnson", "lives", "in", "Los", "Angeles"])
     print(pred)

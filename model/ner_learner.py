@@ -19,7 +19,6 @@ class NERLearner(object):
         self.logger = self.config.logger
         self.model = model
         self.model_path = config.dir_model
-        self.use_cuda = False
         self.use_elmo = config.use_elmo
 
         self.idx_to_tag = {idx: tag for tag, idx in
@@ -42,6 +41,7 @@ class NERLearner(object):
                 self.elmo = self.elmo.cuda()
                 print("Moved elmo to cuda")
         else:
+            self.use_cuda = False
             self.logger.info("No GPU found.")
 
     def get_model_path(self, name):
@@ -349,7 +349,6 @@ class NERLearner(object):
             word_input = embeddings['elmo_representations'][1]
             word_input = Variable(word_input, requires_grad=False)
             word_input = T(((mult*word_input.transpose(0,1)).transpose(0,1).contiguous()).type(torch.FloatTensor), cuda=self.use_cuda)
-            print("Type of word input", word_input)
             inputs = (word_input)
 
         else:
