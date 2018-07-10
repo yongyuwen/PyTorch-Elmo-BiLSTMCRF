@@ -7,7 +7,7 @@
 /.vscode/
 
 /results/
-/others/
+/model/others/
 /model/backup/
 *sh
 
