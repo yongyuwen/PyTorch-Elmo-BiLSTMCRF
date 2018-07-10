@@ -1,3 +1,5 @@
+""" Works with pytorch 0.4.0 """
+
 from fastai.text import *
 from allennlp.modules.elmo import Elmo, batch_to_ids
 from .data_utils import pad_sequences, minibatches, get_chunks
@@ -18,16 +20,29 @@ class NERLearner(object):
         self.model = model
         self.model_path = config.dir_model
         self.use_cuda = False
-        if torch.cuda.is_available():
-            self.use_cuda = True
-            self.logger.info("GPU found.")
-            self.model = model.cuda()
-        else:
-            self.logger.info("No GPU found.")
+        self.use_elmo = config.use_elmo
+
         self.idx_to_tag = {idx: tag for tag, idx in
                            self.config.vocab_tags.items()}
         self.criterion = CRF(self.config.ntags).cuda()
         self.optimizer = optim.Adam(self.model.parameters())
+
+        if self.use_elmo:
+            options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
+            weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
+            self.elmo = Elmo(options_file, weight_file, 2, dropout=0)
+        else:
+            self.load_emb()
+
+        if torch.cuda.is_available():
+            self.use_cuda = True
+            self.logger.info("GPU found.")
+            self.model = model.cuda()
+            if self.use_elmo:
+                self.elmo = self.elmo.cuda()
+                print("Moved elmo to cuda")
+        else:
+            self.logger.info("No GPU found.")
 
     def get_model_path(self, name):
         return os.path.join(self.model_path,name)+'.h5'
@@ -105,7 +120,7 @@ class NERLearner(object):
                     else:
                         word_ids, sequence_lengths = pad_sequences(words, 0)
 
-                    if self.config.use_elmo:
+                    if self.use_elmo:
                         word_ids = words
 
                     if labels:
@@ -150,26 +165,26 @@ class NERLearner(object):
 
         nbatches_train, train_generator = self.batch_iter(train, batch_size,
                                                           return_lengths=True)
-        nbatches_dev, dev_generator =     self.batch_iter(dev, batch_size,
+        nbatches_dev, dev_generator     = self.batch_iter(dev, batch_size,
                                                           return_lengths=True)
 
         scheduler = StepLR(self.optimizer, step_size=1, gamma=self.config.lr_decay)
 
-        if self.config.use_elmo:
-            options_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_options.json"
-            weight_file = "https://s3-us-west-2.amazonaws.com/allennlp/models/elmo/2x4096_512_2048cnn_2xhighway/elmo_2x4096_512_2048cnn_2xhighway_weights.hdf5"
-            self.elmo = Elmo(options_file, weight_file, 2, dropout=0).cuda()
-            print("Moved elmo to cuda")
         if not fine_tune: self.logger.info("Training Model")
+
+        f1s = []
 
         for epoch in range(epochs):
             scheduler.step()
-            if self.config.use_elmo:
-                self.train_elmo(epoch, nbatches_train, train_generator, fine_tune=fine_tune)
-                self.test_elmo(nbatches_dev, dev_generator, fine_tune=fine_tune)
+            self.train(epoch, nbatches_train, train_generator, fine_tune=fine_tune, use_elmo=self.use_elmo)
+            f1 = self.test(nbatches_dev, dev_generator, fine_tune=fine_tune, use_elmo=self.use_elmo)
+
+            # Early stopping
+            if sum([f1 > f1s[-i] for i in range(1,self.config.nepoch_no_imprv+1)]) == 0:
+                print("No improvement in the last 3 epochs. Stopping training")
+                break
             else:
-                self.train(epoch, nbatches_train, train_generator, fine_tune=fine_tune)
-                self.test(nbatches_dev, dev_generator, fine_tune=fine_tune)
+                f1s.append(f1)
 
         if fine_tune:
             self.save(self.config.ner_ft_path)
@@ -177,11 +192,10 @@ class NERLearner(object):
             self.save(self.config.ner_model_path)
 
 
-    def train_elmo(self, epoch, nbatches_train, train_generator, fine_tune=False):
+    def train(self, epoch, nbatches_train, train_generator, fine_tune=False, use_elmo=False):
         self.logger.info('\nEpoch: %d' % epoch)
         self.model.train()
-        if not self.config.use_elmo:
-            self.model.emb.weight.requires_grad = False
+        if not use_elmo: self.model.emb.weight.requires_grad = False
 
         train_loss = 0
         correct = 0
@@ -196,22 +210,35 @@ class NERLearner(object):
                 self.logger.info('Skipping batch of size=1')
                 continue
 
-            sentences = inputs['word_ids']
-            character_ids = batch_to_ids(sentences)
-            embeddings = self.elmo(character_ids.cuda())
-
-            word_input = embeddings['elmo_representations'][0]
             targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
             self.optimizer.zero_grad()
 
-            word_input, targets = Variable(word_input, requires_grad=False), \
-                                  Variable(targets)
+            if use_elmo:
+                sentences = inputs['word_ids']
+                character_ids = batch_to_ids(sentences)
+                embeddings = self.elmo(character_ids.cuda())
+                word_input = embeddings['elmo_representations'][0]
+                word_input, targets = Variable(word_input, requires_grad=False), \
+                                      Variable(targets)
+                inputs = (word_input)
 
-            inputs = (word_input)
+            else:
+                word_input = T(inputs['word_ids'], cuda=self.use_cuda)
+                char_input = T(inputs['char_ids'], cuda=self.use_cuda)
+                word_input, char_input, targets = Variable(word_input, requires_grad=False), \
+                                                  Variable(char_input, requires_grad=False),\
+                                                  Variable(targets)
+                inputs = (word_input, char_input)
+
+
             outputs = self.model(inputs)
 
             # Create mask
-            mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+            if use_elmo:
+                mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+            else:
+                mask = create_mask(sequence_lengths, targets)
+
             # Get CRF Loss
             loss = -1*self.criterion(outputs, targets, mask=mask)
             loss.backward()
@@ -223,15 +250,16 @@ class NERLearner(object):
             masked_targets = mask_targets(targets, sequence_lengths)
 
             t_ = mask.type(torch.LongTensor).sum().item()
-
             total += t_
             c_ = sum([1 if p[i] == mt[i] else 0 for p, mt in zip(predictions, masked_targets) for i in range(len(p))])
             correct += c_
+
             prog.update(batch_idx + 1, values=[("train loss", loss.item())], exact=[("Accuracy", 100*c_/t_)])
 
         self.logger.info("Train Accuracy: %.3f%% (%d/%d)" %(100.*correct/total, correct, total) )
 
-    def test_elmo(self, nbatches_val, val_generator, fine_tune=False):
+
+    def test(self, nbatches_val, val_generator, fine_tune=False, use_elmo=False):
         self.model.eval()
         accs = []
         test_loss = 0
@@ -247,22 +275,32 @@ class NERLearner(object):
                 continue
 
             total_step = batch_idx
-
-            sentences = inputs['word_ids']
-            character_ids = batch_to_ids(sentences)
-            embeddings = self.elmo(character_ids.cuda())
-
-            word_input = embeddings['elmo_representations'][1]
             targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
 
-            word_input, targets = Variable(word_input, requires_grad=False), \
-                                  Variable(targets)
+            if use_elmo:
+                sentences = inputs['word_ids']
+                character_ids = batch_to_ids(sentences)
+                embeddings = self.elmo(character_ids.cuda())
+                word_input = embeddings['elmo_representations'][1]
+                word_input, targets = Variable(word_input, requires_grad=False), \
+                                      Variable(targets)
+                inputs = (word_input)
 
-            inputs = (word_input)
+            else:
+                word_input = T(inputs['word_ids'], cuda=self.use_cuda)
+                char_input = T(inputs['char_ids'], cuda=self.use_cuda)
+                word_input, char_input, targets = Variable(word_input, requires_grad=False), \
+                                                  Variable(char_input, requires_grad=False),\
+                                                  Variable(targets)
+                inputs = (word_input, char_input)
+
             outputs = self.model(inputs)
 
             # Create mask
-            mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+            if use_elmo:
+                mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+            else:
+                mask = create_mask(sequence_lengths, targets)
 
             # Get CRF Loss
             loss = -1*self.criterion(outputs, targets, mask=mask)
@@ -290,145 +328,46 @@ class NERLearner(object):
         acc = np.mean(accs)
 
         self.logger.info("Val Loss : %.3f, Val Accuracy: %.3f%%, Val F1: %.3f%%" %(test_loss/(total_step+1), 100*acc, 100*f1))
-
-    def train(self, epoch, nbatches_train, train_generator, fine_tune=False):
-        self.logger.info('\nEpoch: %d' % epoch)
-        self.model.train()
-        self.model.emb.weight.requires_grad = False
-
-        train_loss = 0
-        correct = 0
-        total = 0
-
-        prog = Progbar(target=nbatches_train)
-
-        for batch_idx, (inputs, targets, sequence_lengths) in enumerate(train_generator):
-
-            if batch_idx == nbatches_train: break
-            if inputs['word_ids'].shape[0] == 1:
-                self.logger.info('Skipping batch of size=1')
-                continue
-
-            word_input = T(inputs['word_ids'], cuda=self.use_cuda)
-            char_input = T(inputs['char_ids'], cuda=self.use_cuda)
-            targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
-            self.optimizer.zero_grad()
-
-            word_input, char_input, targets = Variable(word_input, requires_grad=False), \
-                                              Variable(char_input, requires_grad=False),\
-                                              Variable(targets)
-
-            inputs = (word_input, char_input)
-            outputs = self.model(inputs)
-
-            # Create mask
-            mask = create_mask(sequence_lengths, targets)
-            # Get CRF Loss
-            loss = -1*self.criterion(outputs, targets, mask=mask)
-            loss.backward()
-            self.optimizer.step()
-
-            # Callbacks
-            train_loss += loss.item()
-            predictions = self.criterion.decode(outputs, mask=mask)
-            masked_targets = mask_targets(targets, sequence_lengths)
-
-            t_ = mask.type(torch.LongTensor).sum().item()
-            total += t_
-            c_ = sum([1 if p[i] == mt[i] else 0 for p, mt in zip(predictions, masked_targets) for i in range(len(p))])
-            correct += c_
-
-            prog.update(batch_idx + 1, values=[("train loss", loss.data[0])], exact=[("Accuracy", 100*c_/t_)])
-
-        self.logger.info("Train Accuracy: %.3f%% (%d/%d)" %(100.*correct/total, correct, total) )
-
-
-    def test(self, nbatches_val, val_generator, fine_tune=False):
-        self.model.eval()
-        accs = []
-        test_loss = 0
-        correct_preds = 0
-        total_correct = 0
-        total_preds = 0
-        total_step = None
-
-        for batch_idx, (inputs, targets, sequence_lengths) in enumerate(val_generator):
-            if batch_idx == nbatches_val: break
-            if inputs['word_ids'].shape[0] == 1:
-                self.logger.info('Skipping batch of size=1')
-                continue
-
-            total_step = batch_idx
-            word_input = T(inputs['word_ids'], cuda=self.use_cuda)
-            char_input = T(inputs['char_ids'], cuda=self.use_cuda)
-            targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
-
-            word_input, char_input, targets = Variable(word_input, requires_grad=False), \
-                                              Variable(char_input, requires_grad=False),\
-                                              Variable(targets)
-
-            inputs = (word_input, char_input)
-            outputs = self.model(inputs)
-
-            # Create mask
-            mask = create_mask(sequence_lengths, targets)
-
-            # Get CRF Loss
-            loss = self.criterion(outputs, targets, mask=mask)
-            loss *= -1
-
-            # Callbacks
-            test_loss += loss.item()
-            predictions = self.criterion.decode(outputs, mask=mask)
-            masked_targets = mask_targets(targets, sequence_lengths)
-
-            for lab, lab_pred in zip(masked_targets, predictions):
-
-                accs    += [1 if a==b else 0 for (a, b) in zip(lab, lab_pred)]
-
-                lab_chunks      = set(get_chunks(lab, self.config.vocab_tags))
-                lab_pred_chunks = set(get_chunks(lab_pred,
-                                                 self.config.vocab_tags))
-
-                correct_preds += len(lab_chunks & lab_pred_chunks)
-                total_preds   += len(lab_pred_chunks)
-                total_correct += len(lab_chunks)
-
-        p   = correct_preds / total_preds if correct_preds > 0 else 0
-        r   = correct_preds / total_correct if correct_preds > 0 else 0
-        f1  = 2 * p * r / (p + r) if correct_preds > 0 else 0
-        acc = np.mean(accs)
-
-        self.logger.info("Val Loss : %.3f, Val Accuracy: %.3f%%, Val F1: %.3f%%" %(test_loss/(total_step+1), 100*acc, 100*f1))
-
+        return 100*f1
 
     def evaluate(self,test):
         batch_size = self.config.batch_size
         nbatches_test, test_generator = self.batch_iter(test, batch_size,
                                                         return_lengths=True)
         self.logger.info('Evaluating on test set')
-        self.test(nbatches_test, test_generator)
+        self.test(nbatches_test, test_generator, use_elmo=self.use_elmo)
 
     def predict_batch(self, words):
         self.model.eval()
-        mult = np.ones(self.config.batch_size).reshape(self.config.batch_size, 1).astype(int)
+        mult = np.ones(2).reshape(2, 1).astype(int)
 
-        char_ids, word_ids = zip(*words)
-        word_ids, sequence_lengths = pad_sequences(word_ids, 1)
-        char_ids, word_lengths = pad_sequences(char_ids, pad_tok=0,
-                                               nlevels=2)
-        word_ids = np.asarray(word_ids)
-        char_ids = np.asarray(char_ids)
+        if self.use_elmo:
+            sentences = words
+            character_ids = batch_to_ids(sentences)
+            embeddings = self.elmo(character_ids.cuda())
+            word_input = embeddings['elmo_representations'][1]
+            word_input = Variable(word_input, requires_grad=False)
+            word_input = T(((mult*word_input.transpose(0,1)).transpose(0,1).contiguous()).type(torch.FloatTensor), cuda=self.use_cuda)
+            print("Type of word input", word_input)
+            inputs = (word_input)
 
-        word_input = T(mult*word_ids, cuda=self.use_cuda)
-        char_input = T((mult*char_ids.transpose(1,0,2)).transpose(1,0,2), cuda=self.use_cuda)
+        else:
+            char_ids, word_ids = zip(*words)
+            word_ids, sequence_lengths = pad_sequences(word_ids, 1)
+            char_ids, word_lengths = pad_sequences(char_ids, pad_tok=0,
+                                                   nlevels=2)
+            word_ids = np.asarray(word_ids)
+            char_ids = np.asarray(char_ids)
 
-        word_input, char_input = Variable(word_input, requires_grad=False), \
-                                 Variable(char_input, requires_grad=False)
+            word_input = T(mult*word_ids, cuda=self.use_cuda)
+            char_input = T((mult*char_ids.transpose(1,0,2)).transpose(1,0,2), cuda=self.use_cuda)
+
+            word_input, char_input = Variable(word_input, requires_grad=False), \
+                                     Variable(char_input, requires_grad=False)
+
+            inputs = (word_input, char_input)
 
 
-
-        inputs = (word_input, char_input)
         outputs = self.model(inputs)
 
         predictions = self.criterion.decode(outputs)
@@ -445,11 +384,15 @@ class NERLearner(object):
             preds: list of tags (string), one for each word in the sentence
 
         """
-        words = [self.config.processing_word(w) for w in words_raw]
-        if type(words[0]) == tuple:
-            words = zip(*words)
+        if self.use_elmo:
+            words = words_raw
+        else:
+            words = [self.config.processing_word(w) for w in words_raw]
+            if type(words[0]) == tuple:
+                words = zip(*words)
+
         pred_ids = self.predict_batch([words])
-        preds = [self.idx_to_tag[idx] for idx in pred_ids]
+        preds = [self.idx_to_tag[idx.item() if isinstance(idx, torch.Tensor) else idx] for idx in pred_ids ]
 
         return preds
 

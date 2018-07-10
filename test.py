@@ -1,24 +1,25 @@
 from model.data_utils import CoNLLDataset
 from model.config import Config
-from model.glove_model import NERModel
+from model.ner_model import NERModel
 from model.ner_learner import NERLearner
 
 
 def main():
     # create instance of config
     config = Config()
+    if config.use_elmo: config.processing_word = None
 
     #build model
     model = NERModel(config)
 
     # create datasets
-    test = CoNLLDataset(config.filename_test, config.processing_word, #filename_dev
+    test = CoNLLDataset(config.filename_test, config.processing_word,
                          config.processing_tag, config.max_iter)
 
 
     learn = NERLearner(config, model)
     learn.load()
-    learn.evaluate(test)
+    #learn.evaluate(test)
 
     pred = learn.predict(["Peter", "Johnson", "lives", "in", "Los", "Angeles"])
     print(pred)
