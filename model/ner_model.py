@@ -9,13 +9,13 @@ class NERModel(nn.Module):
 
         if not self.use_elmo:
             self.emb = nn.Embedding(self.config.nwords, self.config.dim_word, padding_idx=0)
-            self.char_embeddings = nn.Embedding(self.config.nchars, self.config.dim_char,
-                                                padding_idx=0)
+            self.char_embeddings = nn.Embedding(self.config.nchars, self.config.dim_char, padding_idx=0)
             self.char_lstm = nn.LSTM(self.config.dim_char, self.config.hidden_size_char, bidirectional=True)
 
         self.dropout = nn.Dropout(p=self.config.dropout)
         self.word_lstm = nn.LSTM(self.config.dim_elmo if self.use_elmo else self.config.dim_word+2*self.config.hidden_size_char,
                                  self.config.hidden_size_lstm, bidirectional=True)
+
         self.linear = LinearClassifier(self.config, layers=[self.config.hidden_size_lstm*2, self.config.ntags], drops=[0.5])
 
 
@@ -49,7 +49,7 @@ class NERModel(nn.Module):
         output = self.dropout(output)
 
         output = self.linear(output)
-        return output #shape = S*B*ntags                 #.transpose(0,1).contiguous() #shape = B*S*hidden_size_lstm
+        return output #shape = S*B*ntags
 
 class LinearBlock(nn.Module):
     def __init__(self, ni, nf, drop):

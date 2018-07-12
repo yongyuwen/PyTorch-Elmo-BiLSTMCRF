@@ -26,7 +26,6 @@ class Config():
         if load:
             self.load()
 
-
     def load(self):
         """Loads vocabulary, processing functions and embeddings
 

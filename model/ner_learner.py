@@ -145,16 +145,16 @@ class NERLearner(object):
         return (nbatches, data_generator())
 
 
-    def fine_tune(self):
+    def fine_tune(self, train, dev=None):
         """
         Fine tune the NER model by freezing the pre-trained encoder and training the newly
         instantiated layers for 1 epochs
         """
         self.logger.info("Fine Tuning Model")
-        self.fit(epochs=1, fine_tune=True)
+        self.fit(train, dev, epochs=1, fine_tune=True)
 
 
-    def fit(self, train, dev, epochs=None, fine_tune=False):
+    def fit(self, train, dev=None, epochs=None, fine_tune=False):
         """
         Fits the model to the training dataset and evaluates on the validation set.
         Saves the model to disk
@@ -165,8 +165,9 @@ class NERLearner(object):
 
         nbatches_train, train_generator = self.batch_iter(train, batch_size,
                                                           return_lengths=True)
-        nbatches_dev, dev_generator     = self.batch_iter(dev, batch_size,
-                                                          return_lengths=True)
+        if dev:
+            nbatches_dev, dev_generator = self.batch_iter(dev, batch_size,
+                                                      return_lengths=True)
 
         scheduler = StepLR(self.optimizer, step_size=1, gamma=self.config.lr_decay)
 
@@ -177,11 +178,13 @@ class NERLearner(object):
         for epoch in range(epochs):
             scheduler.step()
             self.train(epoch, nbatches_train, train_generator, fine_tune=fine_tune, use_elmo=self.use_elmo)
-            f1 = self.test(nbatches_dev, dev_generator, fine_tune=fine_tune, use_elmo=self.use_elmo)
+
+            if dev:
+                f1 = self.test(nbatches_dev, dev_generator, fine_tune=fine_tune, use_elmo=self.use_elmo)
 
             # Early stopping
             if len(f1s) > 0:
-                if sum([f1 > f1s[max(-i, -len(f1s))] for i in range(1,self.config.nepoch_no_imprv+1)]) == 0:
+                if f1 < max(f1s[max(-self.config.nepoch_no_imprv, -len(f1s)):]): #if sum([f1 > f1s[max(-i, -len(f1s))] for i in range(1,self.config.nepoch_no_imprv+1)]) == 0:
                     print("No improvement in the last 3 epochs. Stopping training")
                     break
             else:
@@ -201,6 +204,7 @@ class NERLearner(object):
         train_loss = 0
         correct = 0
         total = 0
+        total_step = None
 
         prog = Progbar(target=nbatches_train)
 
@@ -211,6 +215,7 @@ class NERLearner(object):
                 self.logger.info('Skipping batch of size=1')
                 continue
 
+            total_step = batch_idx
             targets = T(targets, cuda=self.use_cuda).transpose(0,1).contiguous()
             self.optimizer.zero_grad()
 
@@ -257,7 +262,7 @@ class NERLearner(object):
 
             prog.update(batch_idx + 1, values=[("train loss", loss.item())], exact=[("Accuracy", 100*c_/t_)])
 
-        self.logger.info("Train Accuracy: %.3f%% (%d/%d)" %(100.*correct/total, correct, total) )
+        self.logger.info("Train Loss: %.3f, Train Accuracy: %.3f%% (%d/%d)" %(train_loss/(total_step+1), 100.*correct/total, correct, total) )
 
 
     def test(self, nbatches_val, val_generator, fine_tune=False, use_elmo=False):

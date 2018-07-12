@@ -1,3 +1,5 @@
+" Logger and Progress Bar from https://github.com/guillaumegenthial/sequence_tagging "
+
 import time
 import sys
 import logging
