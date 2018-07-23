@@ -1,4 +1,5 @@
-from fastai.text import *
+#from fastai.text import *
+from .core import *
 
 class NERModel(nn.Module):
 

@@ -1,7 +1,9 @@
 """ Works with pytorch 0.4.0 """
 
-from fastai.text import *
+#from fastai.text import *
+
 #from allennlp.modules.elmo import Elmo, batch_to_ids
+from .core import *
 from .data_utils import pad_sequences, minibatches, get_chunks
 from .crf import CRF
 from .general_utils import Progbar
@@ -245,7 +247,7 @@ class NERLearner(object):
             # Create mask
             if use_elmo:
                 mask = Variable(embeddings['mask'].transpose(0,1))
-                if use_cuda:
+                if self.use_cuda:
                     mask = mask.cuda()
             else:
                 mask = create_mask(sequence_lengths, targets, cuda=self.use_cuda)
@@ -439,11 +441,5 @@ def mask_targets(targets, sequence_lengths, batch_first=False):
     return t
 
 
-def load_ner_model(m, p, strict=True):
-    sd = torch.load(p, map_location=lambda storage, loc: storage)
-    names = set(m.state_dict().keys())
-    for n in list(sd.keys()): # list "detatches" the iterator
-        if n not in names and n+'_raw' in names:
-            if n+'_raw' not in sd: sd[n+'_raw'] = sd[n]
-            del sd[n]
-    m.load_state_dict(sd, strict=strict)
+
+
