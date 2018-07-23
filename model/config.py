@@ -106,7 +106,7 @@ class Config():
     ner_model_path = "saves/ner_{}e".format(nepochs)
 
     # elmo config
-    use_elmo = True
+    use_elmo = False
     dim_elmo = 1024
 
     # NOTE: if both chars and crf, only 1.6x slower on GPU

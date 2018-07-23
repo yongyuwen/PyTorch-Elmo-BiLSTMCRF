@@ -1,7 +1,7 @@
 """ Works with pytorch 0.4.0 """
 
 from fastai.text import *
-from allennlp.modules.elmo import Elmo, batch_to_ids
+#from allennlp.modules.elmo import Elmo, batch_to_ids
 from .data_utils import pad_sequences, minibatches, get_chunks
 from .crf import CRF
 from .general_utils import Progbar
@@ -23,7 +23,7 @@ class NERLearner(object):
 
         self.idx_to_tag = {idx: tag for tag, idx in
                            self.config.vocab_tags.items()}
-        self.criterion = CRF(self.config.ntags).cuda()
+        self.criterion = CRF(self.config.ntags)
         self.optimizer = optim.Adam(self.model.parameters())
 
         if self.use_elmo:
@@ -37,6 +37,7 @@ class NERLearner(object):
             self.use_cuda = True
             self.logger.info("GPU found.")
             self.model = model.cuda()
+            self.criterion = self.criterion.cuda()
             if self.use_elmo:
                 self.elmo = self.elmo.cuda()
                 print("Moved elmo to cuda")
@@ -222,7 +223,9 @@ class NERLearner(object):
             if use_elmo:
                 sentences = inputs['word_ids']
                 character_ids = batch_to_ids(sentences)
-                embeddings = self.elmo(character_ids.cuda())
+                if self.use_cuda:
+                    character_ids = character_ids.cuda()
+                embeddings = self.elmo(character_ids)
                 word_input = embeddings['elmo_representations'][0]
                 word_input, targets = Variable(word_input, requires_grad=False), \
                                       Variable(targets)
@@ -241,9 +244,11 @@ class NERLearner(object):
 
             # Create mask
             if use_elmo:
-                mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+                mask = Variable(embeddings['mask'].transpose(0,1))
+                if use_cuda:
+                    mask = mask.cuda()
             else:
-                mask = create_mask(sequence_lengths, targets)
+                mask = create_mask(sequence_lengths, targets, cuda=self.use_cuda)
 
             # Get CRF Loss
             loss = -1*self.criterion(outputs, targets, mask=mask)
@@ -286,7 +291,9 @@ class NERLearner(object):
             if use_elmo:
                 sentences = inputs['word_ids']
                 character_ids = batch_to_ids(sentences)
-                embeddings = self.elmo(character_ids.cuda())
+                if self.use_cuda:
+                    character_ids = character_ids.cuda()
+                embeddings = self.elmo(character_ids)
                 word_input = embeddings['elmo_representations'][1]
                 word_input, targets = Variable(word_input, requires_grad=False), \
                                       Variable(targets)
@@ -304,9 +311,11 @@ class NERLearner(object):
 
             # Create mask
             if use_elmo:
-                mask = Variable(embeddings['mask'].transpose(0,1)).cuda()
+                mask = Variable(embeddings['mask'].transpose(0,1))
+                if self.use_cuda:
+                    mask = mask.cuda()
             else:
-                mask = create_mask(sequence_lengths, targets)
+                mask = create_mask(sequence_lengths, targets, cuda=self.use_cuda)
 
             # Get CRF Loss
             loss = -1*self.criterion(outputs, targets, mask=mask)
@@ -350,7 +359,9 @@ class NERLearner(object):
         if self.use_elmo:
             sentences = words
             character_ids = batch_to_ids(sentences)
-            embeddings = self.elmo(character_ids.cuda())
+            if self.use_cuda:
+                character_ids = character_ids.cuda()
+            embeddings = self.elmo(character_ids)
             word_input = embeddings['elmo_representations'][1]
             word_input = Variable(word_input, requires_grad=False)
             word_input = T(((mult*word_input.transpose(0,1)).transpose(0,1).contiguous()).type(torch.FloatTensor), cuda=self.use_cuda)
@@ -402,9 +413,10 @@ class NERLearner(object):
         return preds
 
 
-def create_mask(sequence_lengths, targets, batch_first=False):
+def create_mask(sequence_lengths, targets, cuda, batch_first=False):
     """ Creates binary mask """
-    mask = Variable(torch.ones(targets.size()).type(torch.ByteTensor)).cuda()
+    mask = Variable(torch.ones(targets.size()).type(torch.ByteTensor))
+    if cuda: mask = mask.cuda()
 
     for i,l in enumerate(sequence_lengths):
         if batch_first:
