@@ -2,12 +2,13 @@
 
 #from fastai.text import *
 
-#from allennlp.modules.elmo import Elmo, batch_to_ids
 from .core import *
 from .data_utils import pad_sequences, minibatches, get_chunks
 from .crf import CRF
 from .general_utils import Progbar
 from torch.optim.lr_scheduler import StepLR
+
+if os.name == "posix": from allennlp.modules.elmo import Elmo, batch_to_ids # AllenNLP is currently only supported on linux
 
 
 class NERLearner(object):
@@ -35,7 +36,7 @@ class NERLearner(object):
         else:
             self.load_emb()
 
-        if torch.cuda.is_available():
+        if USE_GPU:
             self.use_cuda = True
             self.logger.info("GPU found.")
             self.model = model.cuda()
@@ -44,6 +45,7 @@ class NERLearner(object):
                 self.elmo = self.elmo.cuda()
                 print("Moved elmo to cuda")
         else:
+            self.model = model.cpu()
             self.use_cuda = False
             self.logger.info("No GPU found.")
 
