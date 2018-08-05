@@ -39,7 +39,7 @@ def main():
 
     if sys.argv[1] == "pred" or sys.argv[2] == "pred":
         try:
-            sent = (sys.argv[2] if sys.argv[1] == "pred" else sys.argv[3]).split(" ")
+            sent = (sys.argv[2] if sys.argv[1] == "pred" else sys.argv[3])
         except IndexError:
             sent = ["Peter", "Johnson", "lives", "in", "Los", "Angeles"]
 

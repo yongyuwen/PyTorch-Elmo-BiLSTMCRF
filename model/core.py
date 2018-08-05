@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 import numpy as np
 import os
+import spacy
 
 USE_GPU = torch.cuda.is_available()
 

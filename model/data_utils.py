@@ -44,7 +44,7 @@ class CoNLLDataset(object):
 
     """
     def __init__(self, filename, processing_word=None, processing_tag=None,
-                 max_iter=None):
+                 max_iter=None, use_crf=True):
         """
         Args:
             filename: path to the file
@@ -57,6 +57,7 @@ class CoNLLDataset(object):
         self.processing_word = processing_word
         self.processing_tag = processing_tag
         self.max_iter = max_iter
+        self.use_crf = use_crf
         self.length = None
 
 
@@ -79,7 +80,8 @@ class CoNLLDataset(object):
                     if self.processing_word is not None:
                         word = self.processing_word(word)
                     if self.processing_tag is not None:
-                        tag = self.processing_tag(tag)
+                        if self.use_crf:
+                            tag = self.processing_tag(tag)
                     words += [word]
                     tags += [tag]
 
@@ -342,7 +344,7 @@ def pad_sequences(sequences, pad_tok, nlevels=1):
     return sequence_padded, sequence_length
 
 
-def minibatches(data, minibatch_size):
+def minibatches(data, minibatch_size, use_crf=True):
     """
     Args:
         data: generator of (sentence, tags) tuples
@@ -361,7 +363,13 @@ def minibatches(data, minibatch_size):
         if type(x[0]) == tuple:
             x = zip(*x)
         x_batch += [x]
-        y_batch += [y]
+        if use_crf:
+            y_batch += [y]
+        else:
+            if any([x.isdigit() for x in y]):
+                y_batch.append([int(x) for x in y if x.isdigit()])
+            else:
+                y_batch.append([0,0,0,0,0])
 
     if len(x_batch) != 0:
         yield x_batch, y_batch
