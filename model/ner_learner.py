@@ -1,7 +1,5 @@
 """ Works with pytorch 0.4.0 """
 
-#from fastai.text import *
-
 from .core import *
 from .data_utils import pad_sequences, minibatches, get_chunks
 from .crf import CRF
